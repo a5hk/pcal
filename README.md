@@ -7,11 +7,11 @@ Pipe Gregorian calendar dates in `YYYY-MM-DD` format to `to_persian_date` to get
 ## example
 If you have put `to_persian_date` somewhere in your path:
 ```shell
-echo "2019-07-26" | to_persian_date #1398-5-4
+echo "2019-07-26" | to_persian_date #1398-05-04
 ```
 Or if it is not in your path:
 ```shell
-echo "2019-07-26" | /path/to/to_persian_date #1398-5-4
+echo "2019-07-26" | /path/to/to_persian_date #1398-05-04
 ```
 
 # License
