@@ -98,8 +98,8 @@ d2j() {
     if [[ $k -le 185 ]]; then
       local jm=$((1 + k / 31))
       local jd=$((k % 31 + 1))
-      local jmd=$(zero_pad_md $jm $jd)
-      echo "$jy-$jmd"
+
+      echo "$(format_output $jy $jm $jd)"
       return 0
     else
       k=$((k - 186))
@@ -115,26 +115,81 @@ d2j() {
 
   local jm=$((7 + k / 30))
   local jd=$((k % 30 + 1))
-  local jmd=$(zero_pad_md $jm $jd)
 
-  echo "$jy-$jmd"
+  echo "$(format_output $jy $jm $jd)"
 }
 
-zero_pad_md() {
-  local jm=$1
-  local jd=$2
+zero_pad() {
+  local num=$1
 
-  [[ $jm -lt 10 ]] && jm="0$jm"
-  [[ $jd -lt 10 ]] && jd="0$jd"
+  [[ $num -lt 10 ]] && num="0$num"
 
-  echo "$jm-$jd"
+  echo "$num"
 }
 
-read input_date
+format_output() {
+  local jy=$1
+  local jm=$(zero_pad $2)
+  local jd=$(zero_pad $3)
+  local odel=${OPTION_ODEL:--}
 
-y=${input_date%%-*}
-m=${input_date%-*}
-m=${m#*-}
-d=${input_date##*-}
+  echo "$jy$odel$jm$odel$jd"
+}
 
-to_jalaali $y $m $d
+parse_input() {
+  local input_date=$1
+  local idel=${OPTION_IDEL:--}
+  local y=${input_date%%$idel*}
+  local m=${input_date%$idel*}
+  m=${m#*$idel}
+  local d=${input_date##*$idel}
+
+  echo "$((10#$y)) $((10#$m)) $((10#$d))"
+}
+
+print_help() {
+  echo "Usage: to_persian_date [d idelim] [D odelim]"
+  echo "  Convert Gregorian calendar date to Persian calendar date."
+  echo ""
+  echo "  Reads a Gregorian calendar date from standard input and prints "
+  echo "  its corresponding Persian calendar date to standard output."
+  echo ""
+  echo "  Options:"
+  echo "    -h          display this help and exit"
+  echo "    -d idelim   use IDELIM instead of - for date delimiter"
+  echo "    -D Odelim   use ODELIM instead of - for date delimiter"
+}
+
+main() {
+  local input_data
+
+  while getopts ":hd:D:" opt; do
+    case ${opt} in
+      h)
+        print_help
+        exit 0
+        ;;
+      d)
+        OPTION_IDEL=$OPTARG
+        ;;
+      D)
+        OPTION_ODEL=$OPTARG
+        ;;
+      \?)
+        echo "Invalid Option: -$OPTARG" 1>&2
+        exit 1
+        ;;
+      :)
+        echo "Invalid Option: -$OPTARG requires an argument" 1>&2
+        exit 1
+        ;;
+    esac
+  done
+  shift $((OPTIND -1))
+
+  read input_data
+  to_jalaali $(parse_input $input_data)
+}
+
+main "$@"
+

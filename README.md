@@ -4,7 +4,7 @@ Command line tool to convert Gregorian calendar dates to Persian calendar dates.
 # Getting Started
 Pipe Gregorian calendar dates in `YYYY-MM-DD` format to `to_persian_date` to get that date in Persian calendar.
 
-## example
+## examples
 If you have put `to_persian_date` somewhere in your path:
 ```shell
 echo "2019-07-26" | to_persian_date #1398-05-04
@@ -12,6 +12,14 @@ echo "2019-07-26" | to_persian_date #1398-05-04
 Or if it is not in your path:
 ```shell
 echo "2019-07-26" | /path/to/to_persian_date #1398-05-04
+```
+To use a different output delimiter:
+```shell
+echo "2019-07-26" | to_persian_date -D / #1398/05/04
+```
+To use a different input delimiter:
+```shell
+echo "2019/07/26" | to_persian_date -d / #1398-05-04
 ```
 
 # License
