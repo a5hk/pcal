@@ -156,7 +156,7 @@ format_output() {
   local jy=$1
   local jm=$(zero_pad $2)
   local jd=$(zero_pad $3)
-  local odel=${OPTION_ODEL:--}
+  local odel=${OPTION_ODEL--}
 
   echo "$jy$odel$jm$odel$jd"
 }
