@@ -170,6 +170,7 @@ parse_input() {
   local d=${input_date##*$idel}
 
   echo "$((10#$y)) $((10#$m)) $((10#$d))"
+  #echo "$(($y)) $(($m)) $(($d))"
 }
 
 is_leap_jalaali_year() {
@@ -317,7 +318,9 @@ print_help() {
 }
 
 main() {
+  # echo 1: $1
   local input_data
+  local date_in=$1
   local gregorian
   local must_exit=1
 
@@ -369,14 +372,24 @@ main() {
   done
   shift $((OPTIND -1))
 
-  read input_data
+  if [ -z "$date_in" ]; 
+	  # is empty
+  then
+	  # echo read from stdin
+	  read input_data;
+  else 
+	  # echo store argument
+	  input_data=$(echo $date_in)
+  fi
 
+
+  # read from stdin not argument
   if [[ $gregorian -eq 1 ]]; then
     to_gregorian $(parse_input $input_data)
   else
     to_jalaali $(parse_input $input_data)
   fi
+
 }
 
 main "$@"
-
