@@ -1,392 +1,886 @@
 #!/bin/bash
 
+# Require bash 4.0+ (needed for associative arrays)
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "pcal requires bash 4.0 or higher (current: ${BASH_VERSION})" >&2
+  exit 1
+fi
+
+################################################################################
+# pcal - Persian Calendar Date Converter
+#
+# A pure bash implementation for converting between Gregorian and Persian
+# (Jalaali) calendar dates. No external dependencies required.
+#
+# Based on the jalaali-js algorithm by the Jalaali community
+# https://github.com/jalaali/jalaali-js
+#
+# Author: Persian Calendar Date Converter Team
+# License: GNU General Public License v3.0 (GPL-3.0)
+################################################################################
+
+################################################################################
+# GLOBAL CONSTANTS
+################################################################################
+
+# Color support flag (disabled with --no-color or when not a terminal)
+if [[ -t 1 ]]; then
+  PCAL_COLOR=1
+else
+  PCAL_COLOR=0
+fi
+
+# Persian calendar break points for leap year calculations
+# These break points define the 33-year leap year cycles in the Persian calendar
+# Covers years -61 to 3178 of the Jalaali calendar
 BREAKS=(-61 9 38 199 426 686 756 818 1111 1181 1210 1635 2060 2097 2192 2262 2324 2394 2456 3178)
+
+# Persian day names (abbreviated)
+# Sh=Shanbeh(Saturday), Ye=Yekshanbeh(Sunday), Do=Doshanbeh(Monday),
+# Se=Seshanbeh(Tuesday), Ch=Chaharshanbeh(Wednesday), Pa=Panjshanbeh(Thursday),
+# Jo=Jomeh(Friday)
 DAY_NAMES_FA=(Sh Ye Do Se Ch Pa Jo)
+
+# Map Persian day abbreviations to day indices (0-6)
 declare -A DAY_NAMES=([Sh]=0 [Ye]=1 [Do]=2 [Se]=3 [Ch]=4 [Pa]=5 [Jo]=6)
+
+# Map English day abbreviations to Persian day abbreviations
 declare -A DAY_NAMES_EN=([Sat]=Sh [Sun]=Ye [Mon]=Do [Tue]=Se [Wed]=Ch [Thu]=Pa [Fri]=Jo)
+
+# Script version
+PCAL_VERSION="1.0.0"
+
+# Persian month names (12 months)
+# First 6 months have 31 days, next 5 have 30 days, last month has 29/30 days
 MONTH_NAMES=(Farvardin Ordibehesht Khordad Tir Mordad Shahrivar Mehr Aban Azar Dey Bahman Esfand)
 
+################################################################################
+# ERROR HANDLING
+################################################################################
+
+# Print error message to stderr and exit with error code.
+# IMPORTANT: only call this from the top-level (main), never from a function
+# that is invoked via command substitution `$(...)`. `exit` inside a
+# subshell only terminates that subshell, not the parent script, which lets
+# invalid input silently fall through with garbage output. Functions that
+# run inside command substitution must use print_error + `return 1` instead,
+# and every caller must check $? and propagate the failure upward.
+# Args:
+#   $1 - Error message to display
+# Returns:
+#   Exits script with code 1
 exit_error() {
-  >&2 echo "$1"
-  exit 1
+	>&2 echo "$1"
+	exit 1
 }
 
+# Print an error message to stderr without exiting. Safe to call from
+# anywhere, including functions invoked via command substitution. Callers
+# must check the function's exit status ($?) and propagate failure with
+# `return 1` up to main(), which is the only place allowed to call
+# exit_error/exit.
+# Args:
+#   $1 - Error message to display
+# Returns:
+#   1 (always, so `foo || return 1` idioms work)
+print_error() {
+	>&2 echo "$1"
+	return 1
+}
+
+# Validate that a value is a plain (optionally negative) integer.
+# Args:
+#   $1 - value to check
+# Returns:
+#   0 if valid integer, 1 otherwise
+is_integer() {
+	[[ $1 =~ ^-?[0-9]+$ ]]
+}
+
+# Return the number of days in a Gregorian month, accounting for leap years.
+# Args:
+#   $1 - Gregorian year
+#   $2 - Gregorian month (1-12)
+# Returns:
+#   Number of days in that month (28, 29, 30, or 31)
+gregorian_month_length() {
+	local gy=$((10#$1)) gm=$((10#$2))
+	case $gm in
+	1|3|5|7|8|10|12) echo 31 ;;
+	4|6|9|11)         echo 30 ;;
+	2)
+		# Leap year: divisible by 4, except centuries unless divisible by 400
+		if (( gy % 400 == 0 || (gy % 4 == 0 && gy % 100 != 0) )); then
+			echo 29
+		else
+			echo 28
+		fi
+		;;
+	esac
+}
+
+################################################################################
+# HIGH-LEVEL CONVERSION FUNCTIONS
+################################################################################
+
+# Convert Gregorian date to Persian (Jalaali) date
+# This is the main function for Gregorian to Persian conversion
+# Args:
+#   $1 - Gregorian year (e.g., 2019)
+#   $2 - Gregorian month (1-12)
+#   $3 - Gregorian day (1-31)
+# Returns:
+#   Persian date in format YYYY-MM-DD (e.g., 1398-05-04)
 to_jalaali() {
-  local gy=$1
-  local gm=$2
-  local gd=$3
+	local gy=$1 # Gregorian year
+	local gm=$2 # Gregorian month
+	local gd=$3 # Gregorian day
 
-  echo $(d2j $(g2d $gy $gm $gd))
+	if ! is_integer "$gy" || ! is_integer "$gm" || ! is_integer "$gd"; then
+		print_error "Invalid date: expected numeric year/month/day, got '$gy-$gm-$gd'"
+		return 1
+	fi
+	if ((gm < 1 || gm > 12)); then
+		print_error "Invalid Gregorian month: $gm"
+		return 1
+	fi
+	local max_days
+	max_days=$(gregorian_month_length "$gy" "$gm")
+	if ((gd < 1 || gd > max_days)); then
+		print_error "Invalid Gregorian day: $gd (month $gm has $max_days days)"
+		return 1
+	fi
+
+	# Convert: Gregorian -> Julian Day Number -> Persian
+	local jdn
+	jdn=$(g2d "$gy" "$gm" "$gd") || return 1
+	d2j "$jdn" || return 1
 }
 
+# Convert Persian (Jalaali) date to Gregorian date
+# This is the main function for Persian to Gregorian conversion
+# Args:
+#   $1 - Persian year (e.g., 1398)
+#   $2 - Persian month (1-12)
+#   $3 - Persian day (1-31)
+# Returns:
+#   Gregorian date in format YYYY-MM-DD (e.g., 2019-07-26)
 to_gregorian() {
-  local jy=$1
-  local jm=$2
-  local jd=$3
+	local jy=$1 # Persian year (jalaali)
+	local jm=$2 # Persian month
+	local jd=$3 # Persian day
 
-  echo $(format_output $(d2g $(j2d $jy $jm $jd)))
+	if ! is_integer "$jy" || ! is_integer "$jm" || ! is_integer "$jd"; then
+		print_error "Invalid date: expected numeric year/month/day, got '$jy-$jm-$jd'"
+		return 1
+	fi
+	if ((jm < 1 || jm > 12)); then
+		print_error "Invalid Persian month: $jm"
+		return 1
+	fi
+	# Persian calendar: months 1-6 have 31 days, 7-11 have 30, month 12 has 29 or 30
+	local max_days=31
+	if ((jm >= 7 && jm <= 11)); then
+		max_days=30
+	elif ((jm == 12)); then
+		max_days=30  # 30 in leap years, 29 otherwise; accept up to 30
+	fi
+	if ((jd < 1 || jd > max_days)); then
+		print_error "Invalid Persian day: $jd (month $jm has at most $max_days days)"
+		return 1
+	fi
+
+	# Convert: Persian -> Julian Day Number -> Gregorian
+	local jdn
+	jdn=$(j2d "$jy" "$jm" "$jd") || return 1
+	local result
+	result=$(d2g "$jdn") || return 1
+
+	# Parse the space-separated result
+	local gy gm gd
+	read -r gy gm gd <<<"$result"
+
+	# Format and return
+	format_output "$gy" "$gm" "$gd"
 }
 
+################################################################################
+# JULIAN DAY NUMBER (JDN) CONVERSION FUNCTIONS
+################################################################################
+
+# Convert Gregorian date to Julian Day Number
+# Julian Day Number is used as an intermediate representation for date conversion
+# Args:
+#   $1 - Gregorian year
+#   $2 - Gregorian month (1-12)
+#   $3 - Gregorian day (1-31)
+# Returns:
+#   Julian Day Number (integer)
 g2d() {
-  local gy=$1
-  local gm=$2
-  local gd=$3
-  local d=$(( (gy + (gm - 8) / 6 + 100100) * 1461 / 4 + (153 * ((gm + 9) % 12) + 2) / 5 + gd - 34840408 ))
+	local gy=$1 # Gregorian year
+	local gm=$2 # Gregorian month
+	local gd=$3 # Gregorian day
 
-  echo $(( d - ((gy + 100100 + (gm - 8) / 6) / 100) * 3 / 4 + 752 ))
+	# Calculate Julian Day Number using standard algorithm
+	# This accounts for leap years and Gregorian calendar adjustments
+	local d=$(((gy + (gm - 8) / 6 + 100100) * 1461 / 4 + (153 * ((gm + 9) % 12) + 2) / 5 + gd - 34840408))
+
+	# Apply Gregorian calendar correction (accounts for century leap years)
+	echo $((d - ((gy + 100100 + (gm - 8) / 6) / 100) * 3 / 4 + 752))
 }
 
+# Convert Julian Day Number to Gregorian date
+# Reverse conversion from JDN back to Gregorian calendar
+# Args:
+#   $1 - Julian Day Number (integer)
+# Returns:
+#   Gregorian date as "year month day" (space separated)
 d2g() {
-  local jdn=$1
-  local j=$((4 * jdn + 139361631))
-  j=$(( j + (3 * ((4 * jdn + 183187720) / 146097) / 4) * 4 - 3908 ))
-  local i=$(( ((j % 1461) / 4) * 5 + 308 ))
-  local gd=$(( ((i % 153) / 5) + 1 ))
-  local gm=$(( (i / 153) % 12 + 1 ))
-  local gy=$(( j / 1461 - 100100 + (8 - gm) / 6 ))
+	local jdn=$1
 
-  echo "$gy $gm $gd"
+	# Apply reverse algorithm to calculate Gregorian date
+	local j=$((4 * jdn + 139361631))
+	j=$((j + (3 * ((4 * jdn + 183187720) / 146097) / 4) * 4 - 3908))
+	local i=$((((j % 1461) / 4) * 5 + 308))
+
+	# Extract day, month, year from intermediate calculation
+	local gd=$((((i % 153) / 5) + 1))
+	local gm=$(((i / 153) % 12 + 1))
+	local gy=$((j / 1461 - 100100 + (8 - gm) / 6))
+
+	echo "$gy $gm $gd"
 }
 
+################################################################################
+# PERSIAN CALENDAR CALCULATION FUNCTIONS
+################################################################################
+
+# Calculate Persian calendar parameters for a given year
+# This is the core algorithm that determines leap years and calendar alignment
+# Based on the 33-year cycle and break points defined in BREAKS array
+# Args:
+#   $1 - Persian year (e.g., 1398)
+#   $2 - without_leap flag ("true" or "false") - if true, skip leap calculation
+# Returns:
+#   Three space-separated values: "leap gregorian_year march_day"
+#   - leap: 0 if leap year, otherwise days until next leap year
+#   - gregorian_year: corresponding Gregorian year
+#   - march_day: day in March when Persian new year occurs
 jal_cal() {
-  local jy=$1
-  local without_leap=$2
-  local bl=${#BREAKS[@]}
-  local gy=$((jy + 621))
-  local leapj=-14
-  local jp=${BREAKS[0]}
+	local jy=$1            # Persian year
+	local without_leap=$2  # Flag to skip leap calculation
+	local bl=${#BREAKS[@]} # Number of break points
+	local gy=$((jy + 621)) # Convert to approximate Gregorian year
+	local leapj=-14        # Accumulated leap days for Persian calendar
+	local jp=${BREAKS[0]}  # Previous break point
+	local i jm jump n leapg march leap
 
-  if [[ $jy -lt $jp || $jy -ge ${BREAKS[$((bl - 1))]} ]]; then
-    exit_error "Invalid Jalaali year $jy"
-  fi
+	# Validate year is within supported range.
+	# NOTE: this function is always invoked via command substitution
+	# (r=$(jal_cal ...)), so it must NOT call exit_error/exit here -- that
+	# would only kill the subshell and let the caller silently continue with
+	# an empty/garbage result. Report the error and return non-zero instead;
+	# every caller in the chain checks $? and propagates the failure.
+	if [[ $jy -lt $jp || $jy -ge ${BREAKS[$((bl - 1))]} ]]; then
+		print_error "Invalid Jalaali year $jy"
+		return 1
+	fi
 
-  for ((i = 1; i < bl; i++)); do
-    local jm=${BREAKS[$i]}
-    local jump=$((jm - jp))
+	# Find the appropriate break point range for this year
+	# This determines which 33-year cycle the year falls into
+	for ((i = 1; i < bl; i++)); do
+		local jm=${BREAKS[$i]}  # Current break point
+		local jump=$((jm - jp)) # Jump between break points
 
-    if [[ $jy -lt $jm ]]; then
-      break
-    fi
+		# If we've found the right range, stop
+		if [[ $jy -lt $jm ]]; then
+			break
+		fi
 
-    leapj=$(( leapj + (jump / 33) * 8 + (jump % 33) / 4  ))
-    jp=$jm
-  done
+		# Accumulate leap days for this cycle
+		# Each 33-year cycle has 8 leap years
+		leapj=$((leapj + (jump / 33) * 8 + (jump % 33) / 4))
+		jp=$jm
+	done
 
-  local n=$((jy - jp))
-  leapj=$(( leapj + (n / 33) * 8 + ((n % 33) + 3) / 4 ))
+	# Calculate position within the current cycle
+	local n=$((jy - jp))
 
-  if [[ $((jump % 33)) -eq 4 && $((jump - n)) -eq 4 ]]; then
-    leapj=$((leapj + 1))
-  fi
+	# Calculate accumulated leap days including current position
+	leapj=$((leapj + (n / 33) * 8 + ((n % 33) + 3) / 4))
 
-  leapg=$(( gy / 4 - ((gy / 100) + 1) * 3 / 4 - 150 ))
-  march=$((20 + leapj - leapg))
+	# Special case adjustment for specific cycle patterns
+	if [[ $((jump % 33)) -eq 4 && $((jump - n)) -eq 4 ]]; then
+		leapj=$((leapj + 1))
+	fi
 
-  if [[ $without_leap == "false" ]]; then
-    if [[ $((jump - n)) -lt 6 ]]; then
-      n=$(( n - jump + ((jump + 4) / 33) * 33 ))
-    fi
+	# Calculate Gregorian leap days for alignment
+	leapg=$((gy / 4 - ((gy / 100) + 1) * 3 / 4 - 150))
 
-    local leap=$(( ((n + 1) % 33 - 1) % 4 ))
+	# Calculate day in March when Persian new year (Nowruz) occurs
+	march=$((20 + leapj - leapg))
 
-    if [[ leap -eq -1 ]]; then
-      leap=4
-    fi
-  fi
+	# Calculate leap year status if requested
+	local leap=0
+	if [[ $without_leap == "false" ]]; then
+		# Adjust for proximity to cycle boundary
+		if [[ $((jump - n)) -lt 6 ]]; then
+			n=$((n - jump + ((jump + 4) / 33) * 33))
+		fi
 
-  echo "$leap $gy $march"
+		# Calculate leap year status within 33-year cycle
+		# Result is 0 for leap year, 1-3 for non-leap years
+		leap=$((((n + 1) % 33 - 1) % 4))
+
+		if [[ $leap -eq -1 ]]; then
+			leap=4
+		fi
+	fi
+
+	# Return results: leap_status gregorian_year march_day
+	echo "$leap $gy $march"
 }
 
+# Convert Julian Day Number to Persian date
+# This function performs the reverse calculation from JDN to Persian calendar
+# Args:
+#   $1 - Julian Day Number
+# Returns:
+#   Persian date in formatted output (YYYY-MM-DD)
 d2j() {
-  local jdn=$1
-  local gy=$(d2g $jdn)
-  gy=${gy%% *}
-  local jy=$((gy - 621))
-  local r="$(jal_cal $jy 'false')"
-  local jdn1f=$(g2d $gy 3 ${r##* })
-  local k=$((jdn - jdn1f))
+	local jdn=$1
 
-  if [[ $k -ge 0 ]]; then
-    if [[ $k -le 185 ]]; then
-      local jm=$((1 + k / 31))
-      local jd=$((k % 31 + 1))
+	# Get Gregorian year from JDN
+	local gy=$(d2g $jdn)
+	gy=${gy%% *} # Extract just the year
 
-      echo "$(format_output $jy $jm $jd)"
-      return 0
-    else
-      k=$((k - 186))
-    fi
-  else
-    jy=$((jy - 1))
-    k=$((k + 179))
+	# Calculate corresponding Persian year (approximate)
+	local jy=$((gy - 621))
 
-    if [[ ${r%% *} -eq 1 ]]; then
-      k=$((k + 1))
-    fi
-  fi
+	# Get calendar parameters for this Persian year
+	local r
+	r="$(jal_cal "$jy" 'false')" || return 1
 
-  local jm=$((7 + k / 30))
-  local jd=$((k % 30 + 1))
+	# Calculate JDN of Persian new year (1st of Farvardin)
+	local jdn1f
+	jdn1f=$(g2d "$gy" 3 "${r##* }") || return 1
 
-  echo "$(format_output $jy $jm $jd)"
+	# Calculate days since Persian new year
+	local k=$((jdn - jdn1f))
+
+	# Handle dates within the current Persian year
+	if [[ $k -ge 0 ]]; then
+		# First 6 months have 31 days each (days 0-185)
+		if [[ $k -le 185 ]]; then
+			local jm=$((1 + k / 31)) # Month number (1-6)
+			local jd=$((k % 31 + 1)) # Day number (1-31)
+
+			format_output "$jy" "$jm" "$jd"
+			return 0
+		else
+			# Adjust for months 7-12 (which have 30 days)
+			k=$((k - 186))
+		fi
+	else
+		# Date is in previous Persian year
+		jy=$((jy - 1))
+		r="$(jal_cal "$jy" 'false')" || return 1
+		k=$((k + 179))
+
+		# Adjust for leap year (leap years have 30 days in Esfand)
+		if [[ ${r%% *} -eq 0 ]]; then
+			k=$((k + 1))
+		fi
+	fi
+
+	# Calculate month and day for months 7-12 (30 days each, except Esfand)
+	local jm=$((7 + k / 30))
+	local jd=$((k % 30 + 1))
+
+	format_output "$jy" "$jm" "$jd"
 }
 
+# Convert Persian date to Julian Day Number
+# Args:
+#   $1 - Persian year
+#   $2 - Persian month (1-12)
+#   $3 - Persian day (1-31)
+# Returns:
+#   Julian Day Number (integer)
 j2d() {
-  local jy=$1
-  local jm=$2
-  local jd=$3
-  local r=$(jal_cal $jy "true")
-  local gy=${r#* }
-  gy=${gy% *}
-  local g2d_res=$(g2d $gy 3 ${r##* })
+	local jy=$1 # Persian year
+	local jm=$2 # Persian month
+	local jd=$3 # Persian day
 
-  echo $(( g2d_res + (jm - 1) * 31 - (jm / 7) * (jm - 7) + jd - 1 ))
+	# Get calendar parameters (skip leap calculation for JDN calculation)
+	local r
+	r=$(jal_cal "$jy" "true") || return 1
 
+	# Extract Gregorian year and March day from result
+	local gy=${r#* }
+	gy=${gy% *}
+	local g2d_res
+	g2d_res=$(g2d "$gy" 3 "${r##* }") || return 1
+
+	# Calculate JDN by adding days from Persian new year
+	# Formula accounts for:
+	# - First 6 months have 31 days
+	# - Remaining months (7-12) have 30 days
+	# - (jm - 1) * 31: assumes all months are 31 days
+	# - (jm / 7) * (jm - 7): correction for months 7-12 (subtract 1 day per month)
+	echo "$((g2d_res + (jm - 1) * 31 - (jm / 7) * (jm - 7) + jd - 1))"
 }
 
+################################################################################
+# DATE FORMATTING AND PARSING FUNCTIONS
+################################################################################
+
+# Add leading zero to single digit numbers for formatting
+# Args:
+#   $1 - Number to pad (0-99)
+# Returns:
+#   Zero-padded number (e.g., 5 -> 05, 12 -> 12)
 zero_pad() {
-  local num=$1
-
-  [[ $num -lt 10 ]] && num="0$num"
-
-  echo "$num"
+	# printf's %02d correctly handles negatives (e.g. -5 -> "-5", not "0-5",
+	# which the old `[[ $num -lt 10 ]] && num="0$num"` logic produced).
+	printf '%02d' "$1"
 }
 
+# Format date output with optional custom delimiter
+# Uses OPTION_ODEL global variable if set, otherwise defaults to '-'
+# Args:
+#   $1 - Year (4 digits)
+#   $2 - Month (will be zero-padded to 2 digits)
+#   $3 - Day (will be zero-padded to 2 digits)
+# Returns:
+#   Formatted date string (e.g., 2019-07-26 or 2019/07/26)
 format_output() {
-  local jy=$1
-  local jm=$(zero_pad $2)
-  local jd=$(zero_pad $3)
-  local odel=${OPTION_ODEL--}
+	local jy=$1
+	local jm=$(zero_pad $2)
+	local jd=$(zero_pad $3)
+	local odel=${OPTION_ODEL--} # Use custom delimiter or default to '-'
 
-  echo "$jy$odel$jm$odel$jd"
+	echo "$jy$odel$jm$odel$jd"
 }
 
+# Parse input date string with support for custom delimiters
+# Handles both default '-' delimiter and custom delimiters specified with -d option
+# Removes leading zeros to avoid octal interpretation issues
+# Args:
+#   $1 - Date string to parse (e.g., "2019-07-26" or "2019/07/26")
+# Returns:
+#   Space-separated integers: "year month day" (e.g., "2019 7 26")
 parse_input() {
-  local input_date=$1
-  local idel=${OPTION_IDEL:--}
-  local y=${input_date%%$idel*}
-  local m=${input_date%$idel*}
-  m=${m#*$idel}
-  local d=${input_date##*$idel}
+	local input_date=$1
+	local idel=${OPTION_IDEL:--} # Use custom delimiter or default to '-'
+	local y m d
+	local negative_year=false
 
-  echo "$((10#$y)) $((10#$m)) $((10#$d))"
-  #echo "$(($y)) $(($m)) $(($d))"
+	if [[ -z "$input_date" ]]; then
+		print_error "No date provided (empty input)"
+		return 1
+	fi
+
+	# Use different parsing strategy based on delimiter
+	if [[ "$idel" == "-" ]]; then
+		# A leading '-' means a negative (BCE-side Jalaali) year, e.g.
+		# "-61-01-01". Strip it first so it isn't mistaken for the field
+		# delimiter, then re-apply the sign to the parsed year.
+		if [[ "$input_date" == -* ]]; then
+			negative_year=true
+			input_date=${input_date#-}
+		fi
+		# Default delimiter - use bash parameter expansion for better performance
+		y=${input_date%%-*}
+		local rest=${input_date#*-}
+		m=${rest%%-*}
+		d=${rest#*-}
+		[[ $negative_year == true ]] && y="-$y"
+	else
+		# Custom delimiter - use IFS-based parsing
+		IFS="$idel" read -r y m d <<<"$input_date"
+	fi
+
+	if ! is_integer "$y" || ! is_integer "$m" || ! is_integer "$d"; then
+		print_error "Could not parse date '$1' (expected YEAR${idel}MONTH${idel}DAY)"
+		return 1
+	fi
+
+	# Remove leading zeros safely using a loop
+	# This avoids octal interpretation issues with numbers like 08 or 09
+	while [[ ${#y} -gt 1 && ${y:0:1} == "0" ]]; do
+		y=${y:1}
+	done
+	while [[ ${#m} -gt 1 && ${m:0:1} == "0" ]]; do
+		m=${m:1}
+	done
+	while [[ ${#d} -gt 1 && ${d:0:1} == "0" ]]; do
+		d=${d:1}
+	done
+
+	echo "$y $m $d"
 }
 
+################################################################################
+# PERSIAN CALENDAR UTILITY FUNCTIONS
+################################################################################
+
+# Check if current Persian year is a leap year
+# Returns:
+#   "true" if current year is a leap year, "false" otherwise
 is_leap_jalaali_year() {
-  [[ $(jal_cal_leap $(current_persian_year)) -eq 0 ]] && echo "true" && return 0
-  echo "false"
+	local leap
+	leap=$(jal_cal_leap "$(current_persian_year)") || return 1
+	[[ $leap -eq 0 ]] && echo "true" && return 0
+	echo "false"
 }
 
+# Calculate leap year status for a specific Persian year
+# Simplified version of jal_cal that only returns leap status
+# Args:
+#   $1 - Persian year to check
+# Returns:
+#   0 if leap year, non-zero (1-4) otherwise
 jal_cal_leap() {
-  local jy=$1
-  local bl=${#BREAKS[@]}
-  local jp=${BREAKS[0]}
-
-  if [[ $jy -lt $jp || $jy -ge ${BREAKS[$((bl - 1))]} ]]; then
-    echo "Invalid Jalali year $jy"
-    exit 0
-  fi
-
-  for ((i = 1; i < bl; i++)); do
-    local jm=${BREAKS[$i]}
-    local jump=$((jm - jp))
-    [[ $jy -lt $jm ]] && break
-    jp=$jm
-  done
-
-  local n=$((jy - jp))
-  [[ $((jump - n)) -lt 6 ]] && n=$(( n - jump + ((jump + 4) / 33) * 33 ))
-  local leap=$(( ((n + 1) % 33 - 1) % 4 ))
-  [[ $leap -eq -1 ]] && leap=4
-  set -x
-  echo $leap
+	local r
+	r=$(jal_cal "$1" "false") || return 1
+	echo "${r%% *}" # First field is leap status (0 = leap year)
 }
 
+# Get number of days in a Persian month
+# The Persian calendar structure:
+# - Months 1-6 (Farvardin to Shahrivar): 31 days each
+# - Months 7-11 (Mehr to Bahman): 30 days each
+# - Month 12 (Esfand): 29 days (30 in leap years)
+# Args:
+#   $1 - Month number (1-12)
+# Returns:
+#   Number of days in that month (29, 30, or 31)
 jalaali_month_length() {
-  local jm=$1
+	local jm=$1
 
-  [[ $jm -le 6 ]] && echo "31" && return 0
-  [[ $jm -le 11 ]] && echo "30" && return 0
-  [[ $(is_leap_jalaali_year) == "true" ]] && echo "30" && return 0
-  echo "29"
+	# First 6 months always have 31 days
+	[[ $jm -le 6 ]] && echo "31" && return 0
+
+	# Months 7-11 always have 30 days
+	[[ $jm -le 11 ]] && echo "30" && return 0
+
+	# Month 12 (Esfand) has 30 days in leap years, 29 otherwise
+	local leap
+	leap=$(is_leap_jalaali_year) || return 1
+	[[ $leap == "true" ]] && echo "30" && return 0
+	echo "29"
 }
 
+################################################################################
+# CALENDAR DISPLAY FUNCTIONS
+################################################################################
+
+# Display current Persian month as a calendar
+# Shows a formatted calendar grid with the current day highlighted
+# Color coding: Green background (current day), Red (Friday), Magenta (Thursday)
 print_current_month() {
-  local index=$(first_day_of_month)
-  local counter=0
-  local day=1
-  local current_month=$(current_persian_month)
-  local month_length=$(jalaali_month_length $current_month)
-  local fcolor='\e[39m'
-  local bcolor='\e[49m'
-  local dfcolor='\e[39m'
-  local dbcolor='\e[49m'
-  local current_day=$(current_persian_day)
-  local current_month_name=${MONTH_NAMES[$((current_month - 1))]}
-  local month_name_length=${#current_month_name}
-  local month_pad=$(((21 + month_name_length) / 2))
+	# Calculate which day of week the month starts on (0=Sat, 6=Fri)
+	local index
+	index=$(first_day_of_month) || return 1
+	local counter=0 # Tracks position in the 6x7 grid
+	local day=1     # Current day number to print
+	local current_month
+	current_month=$(current_persian_month) || return 1
+	local month_length
+	month_length=$(jalaali_month_length "$current_month") || return 1
 
-  printf '%12s\n' $(current_persian_year)
-  printf "%${month_pad}s\n" $current_month_name
-  echo ${DAY_NAMES_FA[@]}
+	# ANSI color codes for calendar display (disabled when --no-color or not a tty)
+	local fcolor bcolor dfcolor dbcolor
+	if [[ $PCAL_COLOR -eq 1 ]]; then
+		fcolor='\e[39m'  # Current foreground color
+		bcolor='\e[49m'  # Current background color
+		dfcolor='\e[39m' # Default foreground color
+		dbcolor='\e[49m' # Default background color
+	else
+		fcolor=''
+		bcolor=''
+		dfcolor=''
+		dbcolor=''
+	fi
 
-  for ((i = 0; i < 6; i++)); do
-    for ((j = 0; j < 7; j++)); do
-      if [[ $counter -lt $index || $day -gt $month_length ]]; then
-        printf "   "
-      else
-        if [[ $j -eq 6 ]]; then
-          fcolor='\e[31m'
-        elif [[ $j -eq 5 ]]; then
-          fcolor='\e[95m'
-        else
-          fcolor=$dfcolor
-        fi
+	local current_day
+	current_day=$(current_persian_day) || return 1 # Today's day (for highlighting)
+	local current_year
+	current_year=$(current_persian_year) || return 1
+	local current_month_name=${MONTH_NAMES[$((current_month - 1))]}
+	local month_name_length=${#current_month_name}
+	local month_pad=$(((21 + month_name_length) / 2)) # Center month name
 
-        if [[ $day -eq  $current_day ]]; then
-          bcolor='\e[42m'
-        else
-          bcolor=$dbcolor
-        fi
+	# Print calendar header: year centered, month centered, day names
+	printf '%12s\n' "$current_year"
+	printf "%${month_pad}s\n" "$current_month_name"
+	echo "${DAY_NAMES_FA[@]}" # Sh Ye Do Se Ch Pa Jo
 
-        printf "$bcolor$fcolor%02d$dfcolor$dbcolor " $day
-        day=$((day + 1))
-      fi
-      counter=$((counter + 1))
-    done
-    echo ""
-  done
-  echo ""
+	# Print calendar grid: 6 rows × 7 columns (max 42 cells)
+	for ((i = 0; i < 6; i++)); do
+		for ((j = 0; j < 7; j++)); do
+			# Empty cell: before month starts or after month ends
+			if [[ $counter -lt $index || $day -gt $month_length ]]; then
+				printf "   "
+			else
+				# Set foreground color based on day of week
+				if [[ $j -eq 6 ]]; then
+					fcolor='\e[31m' # Red for Friday (Jomeh)
+				elif [[ $j -eq 5 ]]; then
+					fcolor='\e[95m' # Magenta for Thursday (Panjshanbeh)
+				else
+					fcolor=$dfcolor # Default for other days
+				fi
+
+				# Set background color to highlight today
+				if [[ $day -eq $current_day ]]; then
+					bcolor='\e[42m' # Green background for current day
+				else
+					bcolor=$dbcolor # Default background
+				fi
+
+				# Print day number with color formatting
+				printf '%b%02d%b%b ' "$bcolor$fcolor" "$day" "$dfcolor" "$dbcolor"
+				day=$((day + 1))
+			fi
+			counter=$((counter + 1))
+		done
+		echo "" # End of row
+	done
+	echo "" # Blank line after calendar
 }
 
-
-
+# Find English day name for a given day number
+# Used to determine the day of week for calendar calculations
+# Args:
+#   $1 - Day number (days ago from today)
+# Returns:
+#   English day abbreviation (Sat, Sun, Mon, etc.)
 find_en_day_name() {
-  local first_day_number=$1
-  local current_seconds=$(printf '%(%s)T' -1)
-  local first_date_seconds=$(( current_seconds - (first_day_number - 1) * 86400 ))
-  echo "$(printf '%(%a)T' $first_date_seconds)"
+	local first_day_number=$1
+	local current_seconds=$(printf '%(%s)T' -1) # Current Unix timestamp
+	local first_date_seconds=$((current_seconds - (first_day_number - 1) * 86400))
+	# Force the C locale for this lookup: printf's %a honors LC_TIME, and
+	# under a non-English locale it would return a day name that doesn't
+	# match the Sat/Sun/... keys in DAY_NAMES_EN, silently breaking the
+	# calendar's weekday alignment.
+	LC_TIME=C printf '%(%a)T' "$first_date_seconds"
 }
 
+# Get the first day of the current Persian month (0-6, Sh-Jo)
+# Determines which day of the week the month starts on for calendar display
+# Returns:
+#   Day index (0-6, where 0=Shanbeh/Saturday, 6=Jomeh/Friday)
 first_day_of_month() {
-  local current=$(current_persian_date)
-  local first_day_number=$((10#${current##*-}))
+	local current
+	current=$(_today_persian_iso) || return 1
+	local first_day_number=${current##*-} # Extract day from date
+	# Remove leading zeros
+	first_day_number=${first_day_number#0}
 
-  echo ${DAY_NAMES[${DAY_NAMES_EN[$(find_en_day_name $first_day_number)]}]}
+	# Chain: Persian day# → English day name → Persian day index
+	echo "${DAY_NAMES[${DAY_NAMES_EN[$(find_en_day_name "$first_day_number")]}]}"
 }
 
+################################################################################
+# CURRENT DATE HELPER FUNCTIONS
+################################################################################
+
+# Compute today's Persian date as a fixed "Y-M-D" string, always '-'
+# delimited on both input and output regardless of any -d/-D options the
+# user passed on the command line. Used internally by
+# current_persian_day/month/year and the calendar display, so that options
+# meant for explicit date conversion never corrupt the "what is today"
+# calculation (previously `pcal -d / -t` or `pcal -D / -m` produced garbage
+# because the internal parsing/formatting picked up the custom delimiter).
+_today_persian_iso() {
+	(
+		unset OPTION_IDEL OPTION_ODEL
+		local current_g
+		current_g=$(printf '%(%F)T' -1) # Always "YYYY-MM-DD"
+		local y m d
+		IFS='-' read -r y m d <<<"$current_g"
+		to_jalaali "$y" "$m" "$d"
+	)
+}
+
+# Get current date in Persian calendar
+# Converts today's system date to Persian calendar format
+# Returns:
+#   Persian date, formatted with OPTION_ODEL if set (default '-')
 current_persian_date() {
-  local current_g=$(printf '%(%F)T' -1)
-  local current_j=$(to_jalaali $(parse_input $current_g))
-  echo "$current_j"
+	# The system date from printf is always ISO ("YYYY-MM-DD"), so it must
+	# always be parsed with '-' here regardless of any user-supplied -d
+	# delimiter. Only the *output* delimiter (-D) is honored, via to_jalaali.
+	local current_g
+	current_g=$(printf '%(%F)T' -1)
+	local y m d
+	IFS='-' read -r y m d <<<"$current_g"
+	y=${y#0}
+	m=${m#0}
+	d=${d#0} # strip any leading zero (avoids octal bugs)
+	to_jalaali "$y" "$m" "$d"
 }
 
+# Get current Persian day (1-31)
+# Returns:
+#   Day number without leading zeros
 current_persian_day() {
-  local current=$(current_persian_date)
-  local current_day=${current##*-}
-  echo $((10#$current_day))
+	local current
+	current=$(_today_persian_iso) || return 1
+	local current_day=${current##*-} # Extract day portion (after last '-')
+	# Remove leading zero
+	current_day=${current_day#0}
+	echo "$current_day"
 }
 
+# Get current Persian month (1-12)
+# Returns:
+#   Month number without leading zeros
 current_persian_month() {
-  local current=$(current_persian_date)
-  local current_month=${current%-*}
-  current_month=${current_month#*-}
-  echo $((10#$current_month))
+	local current
+	current=$(_today_persian_iso) || return 1
+	local current_month=${current%-*} # Remove day portion
+	current_month=${current_month#*-} # Remove year portion (keep month)
+	# Remove leading zero
+	current_month=${current_month#0}
+	echo "$current_month"
 }
 
+# Get current Persian year
+# Returns:
+#   Year number (4 digits, e.g., 1405)
 current_persian_year() {
-  local current=$(current_persian_date)
-  local current_year=${current%%-*}
-  echo $((10#$current_year))
+	local current
+	current=$(_today_persian_iso) || return 1
+	local current_year=${current%%-*} # Extract year (before first '-')
+	echo "$current_year"
 }
 
+################################################################################
+# HELP AND USER INTERFACE
+################################################################################
+
+# Display help message
+# Shows usage information, available options, and examples
 print_help() {
-  echo "Usage: pcal [d idelim] [D odelim]"
-  echo "  Convert Gregorian calendar date to Persian calendar date."
-  echo ""
-  echo "  Reads a Gregorian calendar date from standard input and prints "
-  echo "  its corresponding Persian calendar date to standard output."
-  echo ""
-  echo "  Options:"
-  echo "    -h          display this help and exit"
-  echo "    -d idelim   use IDELIM instead of - for input date delimiter"
-  echo "    -D Odelim   use ODELIM instead of - for output date delimiter"
-  echo "    -g          convert Persian calendar date to Gregorian calendar date"
-  echo "    -m          display current Persian month in calendar"
-  echo "    -t          print current Persian date"
+	echo "Usage: pcal [OPTIONS]"
+	echo "  Convert Gregorian calendar date to Persian calendar date."
+	echo ""
+	echo "  Reads a Gregorian calendar date from standard input and prints "
+	echo "  its corresponding Persian calendar date to standard output."
+	echo ""
+	echo "  Options:"
+	echo "    -h          display this help and exit"
+	echo "    -v          display version and exit"
+	echo "    -d IDELIM   use IDELIM instead of - for input date delimiter"
+	echo "    -D ODELIM   use ODELIM instead of - for output date delimiter"
+	echo "    -g          convert Persian calendar date to Gregorian calendar date"
+	echo "    -m          display current Persian month in calendar"
+	echo "    -t          print current Persian date"
+	echo ""
+	echo "  Examples:"
+	echo "    echo \"2019-07-26\" | pcal               # Output: 1398-05-04"
+	echo "    echo \"2019/07/26\" | pcal -d /          # Custom input delimiter"
+	echo "    echo \"2019-07-26\" | pcal -D /          # Output: 1398/05/04"
+	echo "    echo \"1398-05-04\" | pcal -g            # Output: 2019-07-26"
+	echo "    pcal -t                                 # Show current date"
+	echo "    pcal -m                                 # Show calendar"
 }
 
+################################################################################
+# MAIN FUNCTION AND OPTION PROCESSING
+################################################################################
+
+# Main function
+# Processes command-line options and performs date conversion
+# Args:
+#   $@ - Command-line arguments
 main() {
-  # echo 1: $1
-  local input_data
-  local date_in=$1
-  local gregorian
-  local must_exit=1
+	local input_data
+	local gregorian=0
 
-  while getopts ":hd:D:gmt" opt; do
-    case ${opt} in
-      d)
-        OPTION_IDEL=$OPTARG
-        ;;
-      D)
-        OPTION_ODEL=$OPTARG
-        ;;
-    esac
-  done
+	# Handle -- (end of options)
+	local args=("$@")
+	local new_args=()
+	local stop_options=false
+	for arg in "${args[@]}"; do
+		if [[ "$stop_options" == true ]]; then
+			new_args+=("$arg")
+		elif [[ "$arg" == "--" ]]; then
+			stop_options=true
+		else
+			new_args+=("$arg")
+		fi
+	done
+	set -- "${new_args[@]}"
 
-  OPTIND=1
+	# Process all options in a single pass
+	while getopts ":hd:D:gmtv" opt; do
+		case ${opt} in
+		h)
+			print_help # Show help message
+			exit 0
+			;;
+		v)
+			echo "pcal $PCAL_VERSION"
+			exit 0
+			;;
+		d)
+			OPTION_IDEL=$OPTARG # Set input delimiter
+			;;
+		D)
+			OPTION_ODEL=$OPTARG # Set output delimiter
+			;;
+		g)
+			gregorian=1 # Flag: convert Persian → Gregorian
+			;;
+		t)
+			current_persian_date || exit 1 # Print today's Persian date
+			exit 0
+			;;
+		m)
+			print_current_month || exit 1 # Print Persian calendar
+			exit 0
+			;;
+		\?)
+			echo "Invalid Option: -$OPTARG" 1>&2
+			exit 1
+			;;
+		:)
+			echo "Invalid Option: -$OPTARG requires an argument" 1>&2
+			exit 1
+			;;
+		esac
+	done
+	shift $((OPTIND - 1)) # Remove processed options from arguments
 
-  while getopts ":hd:D:gmt" opt; do
-    case ${opt} in
-      h)
-        print_help
-        exit 0
-        ;;
-      d)
-        OPTION_IDEL=$OPTARG
-        ;;
-      D)
-        OPTION_ODEL=$OPTARG
-        ;;
-      g)
-        gregorian=1
-        ;;
-      t)
-        current_persian_date
-        exit
-        ;;
-      m)
-        print_current_month
-        exit
-        ;;
-      \?)
-        echo "Invalid Option: -$OPTARG" 1>&2
-        exit 1
-        ;;
-      :)
-        echo "Invalid Option: -$OPTARG requires an argument" 1>&2
-        exit 1
-        ;;
-    esac
-  done
-  shift $((OPTIND -1))
+	# Read input from stdin or remaining arguments
+	if [ -n "$1" ]; then
+		input_data="$1" # Use command-line argument
+	else
+		# `read` returns non-zero on EOF even when it *did* capture a final
+		# line with no trailing newline (e.g. printf "%s" "$date" | pcal), so
+		# only treat this as "no input" when nothing was actually captured.
+		read -r input_data
+		if [[ -z "$input_data" ]]; then
+			exit_error "No date provided (nothing on stdin, no argument)"
+		fi
+	fi
 
-  if [ -z "$date_in" ]; # is empty?
-  then # read from stdin
-	  read input_data;
-  else
-	  input_data=$(echo $date_in)
-  fi
-
-
-  # read from stdin not argument
-  if [[ $gregorian -eq 1 ]]; then
-    to_gregorian $(parse_input $input_data)
-  else
-    to_jalaali $(parse_input $input_data)
-  fi
-
+	# Perform date conversion
+	local parsed
+	parsed=$(parse_input "$input_data") || exit 1 # Parse into "year month day"
+	if [[ $gregorian -eq 1 ]]; then
+		to_gregorian $parsed || exit 1 # Persian → Gregorian
+	else
+		to_jalaali $parsed || exit 1 # Gregorian → Persian (default)
+	fi
 }
 
-main "$@"
+# Script entry point: pass all arguments to main function
+# Guard allows sourcing this file without executing main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	main "$@"
+fi
