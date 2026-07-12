@@ -372,13 +372,10 @@ main() {
   done
   shift $((OPTIND -1))
 
-  if [ -z "$date_in" ]; 
-	  # is empty
-  then
-	  # echo read from stdin
+  if [ -z "$date_in" ]; # is empty?
+  then # read from stdin
 	  read input_data;
-  else 
-	  # echo store argument
+  else
 	  input_data=$(echo $date_in)
   fi
 
