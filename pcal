@@ -317,7 +317,6 @@ print_help() {
 }
 
 main() {
-  local input_data
   local gregorian
   local must_exit=1
 
@@ -369,14 +368,19 @@ main() {
   done
   shift $((OPTIND -1))
 
-  read input_data
+  local input_data="$1"
+  # Read from stdin if no argument was passed.
+  if [[ -z $input_data ]]; then
+      read input_data
+  fi
+
 
   if [[ $gregorian -eq 1 ]]; then
     to_gregorian $(parse_input $input_data)
   else
     to_jalaali $(parse_input $input_data)
   fi
+
 }
 
 main "$@"
-
